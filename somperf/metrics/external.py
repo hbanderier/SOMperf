@@ -3,8 +3,8 @@ External indices
 """
 
 import numpy as np
-from sklearn.metrics.cluster.supervised import check_clusterings
-from sklearn.utils.linear_assignment_ import linear_assignment
+from sklearn.metrics.cluster._supervised import check_clusterings
+from scipy.optimize import linear_sum_assignment as linear_assignment
 from sklearn.metrics import accuracy_score
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
@@ -17,13 +17,13 @@ def _contingency_matrix(y_true, y_pred):
     return w
 
 
-def class_scatter_index(dist_fun, y_true, y_pred):
+def class_scatter_index(precomputed_distances, y_true, y_pred):
     """Class scatter index (CSI).
 
     Parameters
     ----------
-    dist_fun : function (k : int, l : int) => int
-        distance function between units k and l on the map.
+    precomputed_distances : array, shape = [nx, ny] 
+        pairwise distances between units on the map.
     y_true : array, shape = [n]
         true labels.
     y_pred : array, shape = [n]
@@ -45,9 +45,8 @@ def class_scatter_index(dist_fun, y_true, y_pred):
     w = _contingency_matrix(y_true, y_pred)
     groups = np.zeros(n_classes, dtype=np.int64)
     for c in range(n_classes):
-        connectivity = csr_matrix([[1 if dist_fun(k, l) == 1 else 0
-                                   for l in range(n_units) if w[c, l] > 0]
-                                   for k in range(n_units) if w[c, k] > 0])
+        mask = w[c, :] > 0
+        connectivity = csr_matrix(thismat = precomputed_distances[mask, :][:, mask])
         groups[c] = connected_components(csgraph=connectivity, directed=False, return_labels=False)
     return np.mean(groups)
 

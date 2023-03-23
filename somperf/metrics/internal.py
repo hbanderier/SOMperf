@@ -3,13 +3,20 @@ Internal indices
 """
 
 import numpy as np
+from typing import Callable, Tuple
+from nptyping import NDArray, Float, Int, Shape
 from sklearn.metrics.pairwise import euclidean_distances
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import shortest_path
 import pandas as pd
 
 
-def c_measure(dist_fun, x, som=None, d=None):
+def c_measure(
+    precomputed_distances: NDArray[Shape["*, *"], Int],
+    x: NDArray[Shape["*, *"], Float],
+    som: NDArray[Shape["*, *"], Float] = None,
+    d: NDArray[Shape["*, *"], Float] = None,
+) -> float:
     """C measure.
 
     Measures distance preservation between input space and output space. Euclidean distance is used in input space.
@@ -18,8 +25,8 @@ def c_measure(dist_fun, x, som=None, d=None):
 
     Parameters
     ----------
-    dist_fun : function (k : int, l : int) => int
-        distance function between units k and l on the map.
+    precomputed_distances : array, shape = [nx, ny]
+        pairwise distances between units on the map.
     x : array, shape = [n_samples, dim]
         input samples.
     som : array, shape = [n_units, dim]
@@ -39,24 +46,27 @@ def c_measure(dist_fun, x, som=None, d=None):
     n = x.shape[0]
     if d is None:
         if som is None:
-            raise ValueError('If distance matrix d is not given, som cannot be None!')
+            raise ValueError("If distance matrix d is not given, som cannot be None!")
         else:
             d = euclidean_distances(x, som)
     d_data = euclidean_distances(x)
     bmus = np.argmin(d, axis=1)
-    d_som = np.array([[dist_fun(k, l)
-                      for l in bmus]
-                      for k in bmus], dtype=np.float64)
+    d_som = precomputed_distances[bmus[:, None], bmus[None, :]].astype(np.float64)
     return np.sum(d_data * d_som) / 2.0  # should be normalized by n(n-1) ?
 
 
-def combined_error(dist_fun, som, x=None, d=None):
+def combined_error(
+    precomputed_distances: NDArray[Shape["*, *"], Int],
+    som: NDArray[Shape["*, *"], Float],
+    x: NDArray[Shape["*, *"], Float] = None,
+    d: NDArray[Shape["*, *"], Float] = None,
+) -> float:
     """Combined error.
 
     Parameters
     ----------
-    dist_fun : function (k : int, l : int) => int
-        distance function between units k and l on the map.
+    precomputed_distances : array, shape = [nx, ny]
+        pairwise distances between units on the map.
     som : array, shape = [n_units, dim]
         SOM code vectors.
     x : array, shape = [n_samples, dim]
@@ -75,30 +85,44 @@ def combined_error(dist_fun, som, x=None, d=None):
     """
     if d is None:
         if x is None:
-            raise ValueError('If distance matrix d is not given, x cannot be None!')
+            raise ValueError("If distance matrix d is not given, x cannot be None!")
         else:
             d = euclidean_distances(x, som)
     # pairwise euclidean distances between neighboring SOM prototypes
     # distances between non-neighboring units are set to inf to force the path to follow neighboring units
-    d_som = csr_matrix([[np.sqrt(np.sum(np.square(som[k] - som[l]))) if dist_fun(k, l) == 1 else np.inf
-                        for l in range(som.shape[0])]
-                        for k in range(som.shape[0])])
+    d_som = csr_matrix(
+        np.where(
+            precomputed_distances == 1,
+            np.sqrt(np.sum((som[None, ...] - som[:, None, ...]) ** 2, axis=-1)),
+            np.inf,
+        )
+    )
     tbmus = np.argsort(d, axis=1)[:, :2]  # two best matching units
     ces = np.zeros(d.shape[0])
     for i in range(d.shape[0]):
         ces[i] = d[i, tbmus[i, 0]]
-        if dist_fun(tbmus[i, 0], tbmus[i, 1]) == 1:  # if BMUs are neighbors
+        if (
+            precomputed_distances[tbmus[i, 0], tbmus[i, 1]] == 1
+        ):  # if BMUs are neighbors
             ces[i] += d_som[tbmus[i, 0], tbmus[i, 1]]
         else:
-            ces[i] += shortest_path(csgraph=d_som,
-                                    method='auto',
-                                    directed=False,
-                                    return_predecessors=False,
-                                    indices=tbmus[i, 0])[tbmus[i, 1]]
+            ces[i] += shortest_path(
+                csgraph=d_som,
+                method="auto",
+                directed=False,
+                return_predecessors=False,
+                indices=tbmus[i, 0],
+            )[tbmus[i, 1]]
     return np.mean(ces)
 
 
-def distortion(dist_fun, neighborhood_fun, som=None, x=None, d=None):
+def distortion(
+    precomputed_distances: NDArray[Shape["*, *"], Int],
+    neighborhood_fun: Callable,
+    som: NDArray[Shape["*, *"], Float],
+    x: NDArray[Shape["*, *"], Float] = None,
+    d: NDArray[Shape["*, *"], Float] = None,
+) -> float:
     """Distortion (SOM loss function).
 
     Computes distortion, which is the loss function minimized by the SOM learning algorithm.
@@ -107,8 +131,8 @@ def distortion(dist_fun, neighborhood_fun, som=None, x=None, d=None):
 
     Parameters
     ----------
-    dist_fun : function (k : int, l : int) => int
-        distance function between units k and l on the map.
+    precomputed_distances : array, shape = [nx, ny]
+        pairwise distances between units on the map.
     neighborhood_fun : function (d : int) => float in [0,1]
         neighborhood function, equal to 1 when d = 0 and decreasing with d.
     som : array, shape = [n_units, dim]
@@ -125,40 +149,41 @@ def distortion(dist_fun, neighborhood_fun, som=None, x=None, d=None):
     """
     if d is None:
         if som is None or x is None:
-            raise ValueError('If distance matrix d is not given, som and x cannot be None!')
+            raise ValueError(
+                "If distance matrix d is not given, som and x cannot be None!"
+            )
         else:
             d = euclidean_distances(x, som)
     bmus = np.argmin(d, axis=1)
-    weights = np.array([[neighborhood_fun(dist_fun(bmu, k))
-                        for k in range(d.shape[1])]
-                        for bmu in bmus])
+    weights = neighborhood_fun(precomputed_distances[bmus, : d.shape[1]])
     distortions = np.sum(weights * np.square(d), axis=1)
     return np.mean(distortions)
 
 
-def kruskal_shepard_error(dist_fun, x, som=None, d=None):
+def kruskal_shepard_error(
+    precomputed_distances: NDArray[Shape["*, *"], Int],
+    x: NDArray[Shape["*, *"], Float],
+    som: NDArray[Shape["*, *"], Float] = None,
+    d: NDArray[Shape["*, *"], Float] = None,
+) -> float:
     """Kruskal-Shepard error.
-
     Measures distance preservation between input space and output space. Euclidean distance is used in input space.
     In output space, distance is usually Manhattan distance between the best matching units on the maps (this distance
     is provided by the dist_fun argument).
-
     Parameters
     ----------
-    dist_fun : function (k : int, l : int) => int
-        distance function between units k and l on the map.
+    precomputed_distances : array, shape = [nx, ny]
+        pairwise distances between units on the map.
     x : array, shape = [n_samples, dim]
         input samples.
     som : array, shape = [n_units, dim]
         (optional) SOM code vectors.
     d : array, shape = [n_samples, n_units]
         (optional) euclidean distances between input samples and code vectors.
-
     Returns
     -------
     kse : float
         Kruskal-Shepard error (lower is better)
-
     References
     ----------
     Kruskal, J.B. (1964). Multidimensional scaling by optimizing goodness of fit to a nonmetric hypothesis.
@@ -167,20 +192,23 @@ def kruskal_shepard_error(dist_fun, x, som=None, d=None):
     n = x.shape[0]
     if d is None:
         if som is None:
-            raise ValueError('If distance matrix d is not given, som cannot be None!')
+            raise ValueError("If distance matrix d is not given, som cannot be None!")
         else:
             d = euclidean_distances(x, som)
     d_data = euclidean_distances(x)
     d_data /= d_data.max()
     bmus = np.argmin(d, axis=1)
-    d_som = np.array([[dist_fun(k, l)
-                      for l in bmus]
-                      for k in bmus], dtype=np.float64)
+    d_som = precomputed_distances[bmus[:, None], bmus[None, :]].astype(np.float64)
     d_som /= d_som.max()
     return np.sum(np.square(d_data - d_som)) / (n**2 - n)
 
 
-def neighborhood_preservation(k, som, x, d=None):
+def neighborhood_preservation(
+    k: int,
+    som: NDArray[Shape["*, *"], Float],
+    x: NDArray[Shape["*, *"], Float],
+    d: NDArray[Shape["*, *"], Float] = None,
+) -> float:
     """Neighborhood preservation of SOM map.
 
     Parameters
@@ -204,26 +232,37 @@ def neighborhood_preservation(k, som, x, d=None):
     Venna, J., & Kaski, S. (2001). Neighborhood preservation in nonlinear projection methods: An experimental study.
     """
     n = x.shape[0]  # data size
-    assert k < (n / 2), 'Number of neighbors k must be < N/2 (where N is the number of data samples).'
+    assert k < (
+        n / 2
+    ), "Number of neighbors k must be < N/2 (where N is the number of data samples)."
     if d is None:
         d = euclidean_distances(x, som)
     d_data = euclidean_distances(x) + np.diag(np.inf * np.ones(n))
     projections = som[np.argmin(d, axis=1)]
     d_projections = euclidean_distances(projections) + np.diag(np.inf * np.ones(n))
-    original_ranks = pd.DataFrame(d_data).rank(method='min', axis=1)
-    projected_ranks = pd.DataFrame(d_projections).rank(method='min', axis=1)
-    weights = (projected_ranks <= k).sum(axis=1) / (original_ranks <= k).sum(axis=1)  # weight k-NN ties
-    nps = np.zeros(n)
-    for i in range(n):
-        for j in range(n):
-            if (i != j) and (original_ranks.iloc[i, j] <= k) and (projected_ranks.iloc[i, j] > k):
-                nps[i] += (projected_ranks.iloc[i, j] - k) * weights[i]
-    return 1.0 - 2.0 / (n * k * (2*n - 3*k - 1)) * np.sum(nps)
+    original_ranks = pd.DataFrame(d_data).rank(method="min", axis=1)
+    projected_ranks = pd.DataFrame(d_projections).rank(method="min", axis=1)
+    weights = (projected_ranks <= k).sum(axis=1) / (original_ranks <= k).sum(
+        axis=1
+    )  # weight k-NN ties
+    mask0 = np.eye(n, dtype=bool)
+    mask1 = (original_ranks.values <= k) & (projected_ranks.values > k)
+
+    arr0 = (projected_ranks.values - k) * weights.values[:, None]
+    arr0[mask0 | ~mask1] = 0
+
+    nps = np.sum(arr0, axis=1)
+
+    return 1.0 - 2.0 / (n * k * (2 * n - 3 * k - 1)) * np.sum(nps)
 
 
-def neighborhood_preservation_trustworthiness(k, som, x, d=None):
+def neighborhood_preservation_trustworthiness(
+    k: int,
+    som: NDArray[Shape["*, *"], Float],
+    x: NDArray[Shape["*, *"], Float],
+    d: NDArray[Shape["*, *"], Float] = None,
+) -> Tuple[float, float]:
     """Neighborhood preservation and trustworthiness of SOM map.
-
     Parameters
     ----------
     k : int
@@ -234,40 +273,53 @@ def neighborhood_preservation_trustworthiness(k, som, x, d=None):
         input samples.
     d : array, shape = [n_samples, n_units]
         (optional) euclidean distances between input samples and code vectors.
-
     Returns
     -------
     npr, tr : float tuple in [0, 1]
         neighborhood preservation and trustworthiness measures (higher is better)
-
     References
     ----------
     Venna, J., & Kaski, S. (2001). Neighborhood preservation in nonlinear projection methods: An experimental study.
     """
     n = x.shape[0]  # data size
-    assert k < (n / 2), 'Number of neighbors k must be < N/2 (where N is the number of data samples).'
+    assert k < (
+        n / 2
+    ), "Number of neighbors k must be < N/2 (where N is the number of data samples)."
     if d is None:
         d = euclidean_distances(x, som)
+
     d_data = euclidean_distances(x) + np.diag(np.inf * np.ones(n))
     projections = som[np.argmin(d, axis=1)]
     d_projections = euclidean_distances(projections) + np.diag(np.inf * np.ones(n))
-    original_ranks = pd.DataFrame(d_data).rank(method='min', axis=1)
-    projected_ranks = pd.DataFrame(d_projections).rank(method='min', axis=1)
-    weights = (projected_ranks <= k).sum(axis=1) / (original_ranks <= k).sum(axis=1)  # weight k-NN ties
-    nps = np.zeros(n)
-    trs = np.zeros(n)
-    for i in range(n):
-        for j in range(n):
-            if (i != j) and (original_ranks.iloc[i, j] <= k) and (projected_ranks.iloc[i, j] > k):
-                nps[i] += (projected_ranks.iloc[i, j] - k) * weights[i]
-            elif (i != j) and (original_ranks.iloc[i, j] > k) and (projected_ranks.iloc[i, j] <= k):
-                trs[i] += (original_ranks.iloc[i, j] - k) / weights[i]
-    npr = 1.0 - 2.0 / (n * k * (2*n - 3*k - 1)) * np.sum(nps)
-    tr = 1.0 - 2.0 / (n * k * (2*n - 3*k - 1)) * np.sum(trs)
+    original_ranks = pd.DataFrame(d_data).rank(method="min", axis=1)
+    projected_ranks = pd.DataFrame(d_projections).rank(method="min", axis=1)
+    weights = (projected_ranks <= k).sum(axis=1) / (original_ranks <= k).sum(
+        axis=1
+    )  # weight k-NN ties
+
+    mask0 = np.eye(n, dtype=bool)
+    mask1 = (original_ranks.values <= k) & (projected_ranks.values > k)
+    mask2 = (original_ranks.values > k) & (projected_ranks.values <= k)
+
+    arr0 = (projected_ranks.values - k) * weights.values[:, None]
+    arr0[mask0 | ~mask1] = 0
+
+    arr1 = (original_ranks.values - k) / weights.values[:, None]
+    arr1[mask0 | ~mask2] = 0
+
+    trs = np.sum(arr1, axis=1)
+    nps = np.sum(arr0, axis=1)
+
+    npr = 1.0 - 2.0 / (n * k * (2 * n - 3 * k - 1)) * np.sum(nps)
+    tr = 1.0 - 2.0 / (n * k * (2 * n - 3 * k - 1)) * np.sum(trs)
     return npr, tr
 
 
-def quantization_error(som=None, x=None, d=None):
+def quantization_error(
+    som: NDArray[Shape["*, *"], Float] = None,
+    x: NDArray[Shape["*, *"], Float] = None,
+    d: NDArray[Shape["*, *"], Float] = None,
+) -> float:
     """Quantization error.
 
     Computes mean quantization error with euclidean distance.
@@ -288,22 +340,29 @@ def quantization_error(som=None, x=None, d=None):
     """
     if d is None:
         if som is None or x is None:
-            raise ValueError('If distance matrix d is not given, som and x cannot be None!')
+            raise ValueError(
+                "If distance matrix d is not given, som and x cannot be None!"
+            )
         else:
             d = euclidean_distances(x, som)
     qes = np.min(d, axis=1)
     return np.mean(qes)
 
 
-def topographic_error(dist_fun, som=None, x=None, d=None):
+def topographic_error(
+    precomputed_distances: NDArray[Shape["*, *"], Int],
+    x: NDArray[Shape["*, *"], Float] = None,
+    som: NDArray[Shape["*, *"], Float] = None,
+    d: NDArray[Shape["*, *"], Float] = None,
+) -> float:
     """SOM topographic error.
 
     Topographic error is the ratio of data points for which the two best matching units are not neighbors on the map.
 
     Parameters
     ----------
-    dist_fun : function (k : int, l : int) => int
-        distance function between units k and l on the map.
+    precomputed_distances : array, shape = [nx, ny]
+        pairwise distances between units on the map.
     som : array, shape = [n_units, dim]
         (optional) SOM code vectors.
     x : array, shape = [n_samples, dim]
@@ -318,11 +377,13 @@ def topographic_error(dist_fun, som=None, x=None, d=None):
     """
     if d is None:
         if som is None or x is None:
-            raise ValueError('If distance matrix d is not given, som and x cannot be None!')
+            raise ValueError(
+                "If distance matrix d is not given, som and x cannot be None!"
+            )
         else:
             d = euclidean_distances(x, som)
     tbmus = np.argsort(d, axis=1)[:, :2]  # two best matching units
-    tes = np.array([dist_fun(tbmu[0], tbmu[1]) > 1 for tbmu in tbmus])
+    tes = precomputed_distances[tbmus[:, 0], tbmus[:, 1]] > 1
     return np.mean(tes)
 
 
@@ -358,12 +419,14 @@ def topographic_function(ks, dist_fun, max_dist, som=None, x=None, d=None, som_d
     """
     if d is None:
         if som is None or x is None:
-            raise ValueError('If distance matrix d is not given, som and x cannot be None!')
+            raise ValueError(
+                "If distance matrix d is not given, som and x cannot be None!"
+            )
         else:
             d = euclidean_distances(x, som)
     tbmus = np.argsort(d, axis=1)[:, :2]  # two best matching units
     n_units = d.shape[1]
-    C = np.zeros((n_units, n_units), dtype='int')  # connectivity matrix
+    C = np.zeros((n_units, n_units), dtype="int")  # connectivity matrix
     for tbmu in tbmus:
         C[tbmu[0], tbmu[1]] = 1
         C[tbmu[1], tbmu[0]] = 1
@@ -371,7 +434,7 @@ def topographic_function(ks, dist_fun, max_dist, som=None, x=None, d=None, som_d
     for c in range(n_units):
         for cc in range(n_units):
             for i, k in enumerate(ks):
-                if dist_fun(c, cc)/max_dist > k and C[c, cc] == 1:
+                if dist_fun(c, cc) / max_dist > k and C[c, cc] == 1:
                     tf[i] += 1
     return tf / (n_units * (n_units - 3**som_dim))
 
@@ -398,29 +461,54 @@ def topographic_product(dist_fun, som):
     n_units = som.shape[0]
     original_d = euclidean_distances(som) + 1e-16
     original_knn = np.argsort(original_d, axis=1)
-    map_d = np.array([[dist_fun(j, k)
-                      for k in range(n_units)]
-                      for j in range(n_units)]) + 1e-16
+    map_d = (
+        np.array([[dist_fun(j, k) for k in range(n_units)] for j in range(n_units)])
+        + 1e-16
+    )
     map_knn = np.argsort(map_d, axis=1)
     # compute Q1 (n_units x n_units-1 matrix)
-    q1 = np.array([[np.divide(original_d[j, map_knn[j, k]], original_d[j, original_knn[j, k]])
-                   for k in range(1, n_units)]
-                   for j in range(n_units)])
+    q1 = np.array(
+        [
+            [
+                np.divide(
+                    original_d[j, map_knn[j, k]], original_d[j, original_knn[j, k]]
+                )
+                for k in range(1, n_units)
+            ]
+            for j in range(n_units)
+        ]
+    )
     # compute Q2 (n_units x n_units-1 matrix)
-    q2 = np.array([[np.divide(map_d[j, map_knn[j, k]], map_d[j, original_knn[j, k]])
-                   for k in range(1, n_units)]
-                   for j in range(n_units)])
+    q2 = np.array(
+        [
+            [
+                np.divide(map_d[j, map_knn[j, k]], map_d[j, original_knn[j, k]])
+                for k in range(1, n_units)
+            ]
+            for j in range(n_units)
+        ]
+    )
     # compute P3 (n_units x n_units-1 matrix)
-    p3 = np.array([[np.prod([(q1[j, l] * q2[j, l])**(1/(2*k)) for l in range(k)])
-                   for k in range(1, n_units)]
-                   for j in range(n_units)])
+    p3 = np.array(
+        [
+            [
+                np.prod([(q1[j, l] * q2[j, l]) ** (1 / (2 * k)) for l in range(k)])
+                for k in range(1, n_units)
+            ]
+            for j in range(n_units)
+        ]
+    )
     # combine final result (float)
     return np.sum(np.log(p3)) / (n_units * (n_units - 1))
 
 
-def trustworthiness(k, som, x, d=None):
+def trustworthiness(
+    k: int,
+    som: NDArray[Shape["*, *"], Float],
+    x: NDArray[Shape["*, *"], Float],
+    d: NDArray[Shape["*, *"], Float] = None,
+) -> Tuple[float, float]:
     """Trustworthiness of SOM map.
-
     Parameters
     ----------
     k : int
@@ -431,29 +519,37 @@ def trustworthiness(k, som, x, d=None):
         input samples.
     d : array, shape = [n_samples, n_units]
         (optional) euclidean distances between input samples and code vectors.
-
     Returns
     -------
     tr : float in [0, 1]
         trustworthiness measure (higher is better)
-
     References
     ----------
     Venna, J., & Kaski, S. (2001). Neighborhood preservation in nonlinear projection methods: An experimental study.
     """
     n = x.shape[0]  # data size
-    assert k < (n / 2), 'Number of neighbors k must be < N/2 (where N is the number of data samples).'
+    assert k < (
+        n / 2
+    ), "Number of neighbors k must be < N/2 (where N is the number of data samples)."
     if d is None:
         d = euclidean_distances(x, som)
+
     d_data = euclidean_distances(x) + np.diag(np.inf * np.ones(n))
     projections = som[np.argmin(d, axis=1)]
     d_projections = euclidean_distances(projections) + np.diag(np.inf * np.ones(n))
-    original_ranks = pd.DataFrame(d_data).rank(method='min', axis=1)
-    projected_ranks = pd.DataFrame(d_projections).rank(method='min', axis=1)
-    weights = (original_ranks <= k).sum(axis=1) / (projected_ranks <= k).sum(axis=1)  # weight k-NN ties
-    trs = np.zeros(n)
-    for i in range(n):
-        for j in range(n):
-            if (i != j) and (original_ranks.iloc[i, j] > k) and (projected_ranks.iloc[i, j] <= k):
-                trs[i] += (original_ranks.iloc[i, j] - k) * weights[i]
-    return 1.0 - 2.0 / (n * k * (2*n - 3*k - 1)) * np.sum(trs)
+    original_ranks = pd.DataFrame(d_data).rank(method="min", axis=1)
+    projected_ranks = pd.DataFrame(d_projections).rank(method="min", axis=1)
+    weights = (projected_ranks <= k).sum(axis=1) / (original_ranks <= k).sum(
+        axis=1
+    )  # weight k-NN ties
+
+    mask0 = np.eye(n, dtype=bool)
+    mask2 = (original_ranks.values > k) & (projected_ranks.values <= k)
+
+    arr1 = (original_ranks.values - k) / weights.values[:, None]
+    arr1[mask0 | ~mask2] = 0
+
+    trs = np.sum(arr1, axis=1)
+
+    return 1.0 - 2.0 / (n * k * (2 * n - 3 * k - 1)) * np.sum(trs)
+
